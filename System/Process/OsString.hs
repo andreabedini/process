@@ -10,15 +10,10 @@
 -- Operations for creating and interacting with sub-processes, for 'OsPath'
 -- and 'OsString'.
 --
--- This module has the same interface as "System.Process", with two
--- differences:
---
--- * The executable and the working directory are an 'OsPath'. The arguments,
---   the shell command, and the names and values of the environment are an
---   'OsString'.
---
--- * The old functions that "System.Process" keeps for compatibility, such as
---   'System.Process.runProcess' and 'System.Process.system', are not here.
+-- This module has the same interface as "System.Process", with one
+-- difference: the executable and the working directory are an 'OsPath', and
+-- the arguments, the shell command, and the names and values of the
+-- environment are an 'OsString'.
 --
 -- The functions that do not have a string in their type, such as
 -- 'waitForProcess', are the same functions as in "System.Process". A
@@ -103,15 +98,26 @@ module System.Process.OsString (
     -- * Interprocess communication
     createPipe,
     createPipeFd,
+
+    -- * Old functions
+    -- | These functions pre-date 'createProcess' which is much more
+    -- flexible.
+    runProcess,
+    runCommand,
+    runInteractiveProcess,
+    runInteractiveCommand,
+    system,
+    rawSystem,
     ) where
 
 import Control.DeepSeq (rnf)
 import qualified Control.Exception as C
 import Control.Monad (unless)
-import GHC.IO.Exception (IOErrorType(OtherError))
+import Data.Maybe (fromJust)
+import GHC.IO.Exception (IOErrorType(InvalidArgument, OtherError), ioException)
 import System.Exit (ExitCode(..))
 import System.IO
-import System.IO.Error (mkIOError)
+import System.IO.Error (ioeSetErrorString, mkIOError)
 import System.OsPath (OsPath, OsString)
 
 import System.Process
@@ -129,8 +135,14 @@ import System.Process
   , waitForProcess
   )
 import qualified System.Process as F
+import System.Process.Common.OsString
+  ( CmdSpec(..)
+  , CreateProcess(..)
+  , createProcess_
+  , decodeLenient
+  , encodeLenient
+  )
 import System.Process.Internals (ignoreSigPipe, withForkWait)
-import System.Process.OsString.Internal
 
 -- ----------------------------------------------------------------------------
 -- createProcess
@@ -406,3 +418,102 @@ readCreateProcessWithExitCode cp input = do
 showCommandForUser :: OsPath -> [OsString] -> OsString
 showCommandForUser cmd args =
     encodeLenient (F.showCommandForUser (decodeLenient cmd) (map decodeLenient args))
+
+-- ----------------------------------------------------------------------------
+-- Old functions
+
+-- | 'System.Process.runCommand' for 'OsString'.
+--
+-- @since 1.6.31.0
+runCommand
+  :: OsString
+  -> IO ProcessHandle
+runCommand string = do
+  (_,_,_,ph) <- createProcess_ "runCommand" (shell string)
+  return ph
+
+-- | 'System.Process.runProcess' for 'OsString'.
+--
+-- @since 1.6.31.0
+runProcess
+  :: OsPath                         -- ^ Filename of the executable (see 'RawCommand' for details)
+  -> [OsString]                     -- ^ Arguments to pass to the executable
+  -> Maybe OsPath                   -- ^ Optional path to the working directory
+  -> Maybe [(OsString, OsString)]   -- ^ Optional environment (otherwise inherit)
+  -> Maybe Handle                   -- ^ Handle to use for @stdin@ (Nothing => use existing @stdin@)
+  -> Maybe Handle                   -- ^ Handle to use for @stdout@ (Nothing => use existing @stdout@)
+  -> Maybe Handle                   -- ^ Handle to use for @stderr@ (Nothing => use existing @stderr@)
+  -> IO ProcessHandle
+runProcess cmd args mb_cwd mb_env mb_stdin mb_stdout mb_stderr = do
+  (_,_,_,ph) <-
+      createProcess_ "runProcess"
+         (proc cmd args){ cwd = mb_cwd,
+                          env = mb_env,
+                          std_in  = mbToStd mb_stdin,
+                          std_out = mbToStd mb_stdout,
+                          std_err = mbToStd mb_stderr }
+  maybeClose mb_stdin
+  maybeClose mb_stdout
+  maybeClose mb_stderr
+  return ph
+ where
+  maybeClose :: Maybe Handle -> IO ()
+  maybeClose (Just  hdl)
+    | hdl /= stdin && hdl /= stdout && hdl /= stderr = hClose hdl
+  maybeClose _ = return ()
+
+  mbToStd :: Maybe Handle -> StdStream
+  mbToStd Nothing    = Inherit
+  mbToStd (Just hdl) = UseHandle hdl
+
+-- | 'System.Process.runInteractiveCommand' for 'OsString'.
+--
+-- @since 1.6.31.0
+runInteractiveCommand
+  :: OsString
+  -> IO (Handle,Handle,Handle,ProcessHandle)
+runInteractiveCommand string =
+  runInteractiveProcess1 "runInteractiveCommand" (shell string)
+
+-- | 'System.Process.runInteractiveProcess' for 'OsString'.
+--
+-- @since 1.6.31.0
+runInteractiveProcess
+  :: OsPath                         -- ^ Filename of the executable (see 'RawCommand' for details)
+  -> [OsString]                     -- ^ Arguments to pass to the executable
+  -> Maybe OsPath                   -- ^ Optional path to the working directory
+  -> Maybe [(OsString, OsString)]   -- ^ Optional environment (otherwise inherit)
+  -> IO (Handle,Handle,Handle,ProcessHandle)
+runInteractiveProcess cmd args mb_cwd mb_env = do
+  runInteractiveProcess1 "runInteractiveProcess"
+        (proc cmd args){ cwd = mb_cwd, env = mb_env }
+
+runInteractiveProcess1
+  :: String
+  -> CreateProcess
+  -> IO (Handle,Handle,Handle,ProcessHandle)
+runInteractiveProcess1 fun cmd = do
+  (mb_in, mb_out, mb_err, p) <-
+      createProcess_ fun
+           cmd{ std_in  = CreatePipe,
+                std_out = CreatePipe,
+                std_err = CreatePipe }
+  return (fromJust mb_in, fromJust mb_out, fromJust mb_err, p)
+
+-- | 'System.Process.system' for 'OsString'.
+--
+-- @since 1.6.31.0
+system :: OsString -> IO ExitCode
+system str
+  | str == mempty = ioException (ioeSetErrorString (mkIOError InvalidArgument "system" Nothing Nothing) "null command")
+  | otherwise = do
+      (_,_,_,p) <- createProcess_ "system" (shell str) { delegate_ctlc = True }
+      waitForProcess p
+
+-- | 'System.Process.rawSystem' for 'OsString'.
+--
+-- @since 1.6.31.0
+rawSystem :: OsPath -> [OsString] -> IO ExitCode
+rawSystem cmd args = do
+  (_,_,_,p) <- createProcess_ "rawSystem" (proc cmd args) { delegate_ctlc = True }
+  waitForProcess p

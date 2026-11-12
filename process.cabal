@@ -61,12 +61,14 @@ library
         System.Process
         System.Process.CommunicationHandle
         System.Process.CommunicationHandle.Internal
+        System.Process.CommunicationHandle.OsString
         System.Process.Environment.OsString
         System.Process.Internals
+        System.Process.Internals.OsString
         System.Process.OsString
     other-modules:
         System.Process.Common
-        System.Process.OsString.Internal
+        System.Process.Common.OsString
     if os(windows)
         c-sources:
             cbits/win32/runProcess.c

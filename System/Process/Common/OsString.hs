@@ -1,20 +1,33 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE PackageImports #-}
 
--- | The types of "System.Process.OsString", and the one function of that
--- module that depends on the platform.
-module System.Process.OsString.Internal
+-- | The types of "System.Process.OsString", and the functions of the
+-- 'OsString' API that depend on the platform.
+--
+-- "System.Process.Common" does the same for the 'FilePath' API.
+module System.Process.Common.OsString
     ( CreateProcess(..)
     , CmdSpec(..)
     , createProcess_
+    , withFilePathException
+    , withCEnvironment
+    , translate
     , toFilePathCreateProcess
     , decodeLenient
     , encodeLenient
     ) where
 
+import Control.Exception (SomeException, handle, try)
+#if defined(mingw32_HOST_OS)
+import Foreign.C.String (CWString)
+#else
+import Foreign.C.String (CString)
+#endif
+import Foreign.Ptr (Ptr)
 import GHC.IO.Encoding.Failure (CodingFailureMode(RoundtripFailure))
 import GHC.IO.Encoding.UTF8 (mkUTF8)
 import System.IO (Handle)
+import System.IO.Error (ioeSetFileName)
 import System.OsPath (OsPath)
 import qualified System.OsPath as OsPath
 import System.OsPath.Encoding (utf16le_b)
@@ -27,19 +40,17 @@ import "filepath" System.OsString.Internal.Types (OsString(..))
 import System.Process.Common
   ( GroupID, ProcessHandle, StdStream, UserID )
 import qualified System.Process.Common as F
+import qualified System.Process.Internals as F (translate)
 
 #if defined(mingw32_HOST_OS) || defined(javascript_HOST_ARCH)
 
-import qualified System.Process.Internals as F (createProcess_)
+import qualified System.Process.Internals as F (createProcess_, withCEnvironment)
 
 #else
 
-import Control.Exception (SomeException, handle, try)
-import Foreign.C.String (CString)
 import Foreign.Marshal.Array (withArray0)
 import Foreign.Marshal.Utils (maybeWith, withMany)
-import Foreign.Ptr (Ptr, nullPtr)
-import System.IO.Error (ioeSetFileName)
+import Foreign.Ptr (nullPtr)
 import System.Posix.PosixPath.FilePath (withFilePath)
 #if MIN_VERSION_filepath(1, 5, 0)
 import "os-string" System.OsString.Data.ByteString.Short (useAsCString)
@@ -133,8 +144,9 @@ toFilePathCreateProcess cp = do
     , F.child_user         = child_user cp
     , F.use_process_jobs   = use_process_jobs cp
     }
-  where
-    decodeVar (name, val) = (,) <$> OsPath.decodeFS name <*> OsPath.decodeFS val
+
+decodeVar :: (OsString, OsString) -> IO (String, String)
+decodeVar (name, val) = (,) <$> OsPath.decodeFS name <*> OsPath.decodeFS val
 
 -- | Decode an 'OsString' without failing and without using the locale.
 --
@@ -151,6 +163,26 @@ encodeLenient :: String -> OsString
 encodeLenient s =
   either (const (OsPath.pack (map OsPath.unsafeFromChar s))) id $
     OsPath.encodeWith (mkUTF8 RoundtripFailure) utf16le_b s
+
+-- | 'System.Process.Internals.translate' for 'OsString'.
+--
+-- @since 1.6.31.0
+translate :: OsString -> OsString
+translate = encodeLenient . F.translate . decodeLenient
+
+-- | 'System.Process.Internals.withFilePathException' for 'OsPath'.
+--
+-- @since 1.6.31.0
+withFilePathException :: OsPath -> IO a -> IO a
+withFilePathException path = handle mapEx
+  where
+    mapEx ex = do
+      -- This is the file name that the base library would show.
+      r <- try (OsPath.decodeFS path)
+      let fpath = case r of
+            Left e   -> const (decodeLenient path) (e :: SomeException)
+            Right fp -> fp
+      ioError (ioeSetFileName ex fpath)
 
 -- ----------------------------------------------------------------------------
 -- createProcess_
@@ -175,13 +207,25 @@ createProcess_
 -- it has to decode an OsString at some point anyway.
 createProcess_ fun cp = toFilePathCreateProcess cp >>= F.createProcess_ fun
 
+-- | 'System.Process.Internals.withCEnvironment' for 'OsString'.
+--
+-- @since 1.6.31.0
+#if defined(mingw32_HOST_OS)
+withCEnvironment :: [(OsString, OsString)] -> (Ptr CWString -> IO a) -> IO a
+#else
+withCEnvironment :: [(OsString, OsString)] -> (Ptr CString -> IO a) -> IO a
+#endif
+withCEnvironment envir act = do
+  envir' <- mapM decodeVar envir
+  F.withCEnvironment envir' act
+
 #else
 
 -- On POSIX an OsString is a sequence of bytes. We give these bytes to the
 -- operating system as they are. The FilePath-based implementation cannot do
 -- this: it encodes every String with the encoding of the current locale.
 createProcess_ fun cp =
-  withOsPathException cmd $
+  withFilePathException cmd $
    maybeWith withCEnvironment (env cp) $ \pEnv ->
    maybeWith withOsPath (cwd cp) $ \pWorkDir ->
    withOsPath cmd $ \cmdstr ->
@@ -223,21 +267,12 @@ withOsPath = withFilePath . getOsString
 withOsString :: OsString -> (CString -> IO a) -> IO a
 withOsString = useAsCString . getPosixString . getOsString
 
+-- | 'System.Process.Internals.withCEnvironment' for 'OsString'.
+--
+-- @since 1.6.31.0
 withCEnvironment :: [(OsString, OsString)] -> (Ptr CString -> IO a) -> IO a
 withCEnvironment envir act =
   let env' = map (\(name, val) -> name <> ascii "=" <> val) envir
   in withMany withOsString env' (\pEnv -> withArray0 nullPtr pEnv act)
-
--- | 'System.Process.Internals.withFilePathException' for 'OsPath'.
-withOsPathException :: OsPath -> IO a -> IO a
-withOsPathException path = handle mapEx
-  where
-    mapEx ex = do
-      -- This is the file name that the base library would show.
-      r <- try (OsPath.decodeFS path)
-      let fpath = case r of
-            Left e   -> const (decodeLenient path) (e :: SomeException)
-            Right fp -> fp
-      ioError (ioeSetFileName ex fpath)
 
 #endif

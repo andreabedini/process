@@ -7,8 +7,10 @@ import System.Exit
 import System.IO.Error
 import System.Directory (getCurrentDirectory, setCurrentDirectory)
 import System.Process
-import System.Process.Internals (withForkWait, ignoreSigPipe)
+import System.Process.Internals (withForkWait, ignoreSigPipe, translate)
 import System.Process.CommunicationHandle
+import qualified System.Process.CommunicationHandle.OsString as OC
+import qualified System.Process.Internals.OsString as OI
 import qualified System.Process.OsString as O
 import Control.Concurrent
 import Control.DeepSeq
@@ -29,6 +31,11 @@ import GHC.Conc.Sync (getUncaughtExceptionHandler, setUncaughtExceptionHandler)
 
 #if defined(__IO_MANAGER_WINIO__)
 import GHC.IO.SubSystem ((<!>))
+#endif
+#if !defined(mingw32_HOST_OS)
+import Foreign.C.String (peekCString)
+import Foreign.Marshal.Array (peekArray0)
+import Foreign.Ptr (nullPtr)
 #endif
 
 import Test.Paths ( processInternalExes )
@@ -73,6 +80,9 @@ main = do
     testOsStringShowCommandForUser
     testOsStringCwdAndEnv
     testOsStringBytes
+    testOsStringOldFunctions
+    testOsStringInternals
+    testOsStringCommunicationHandle
     putStrLn ">>> Tests passed successfully"
 
 run :: String -> IO () -> IO ()
@@ -458,6 +468,111 @@ testOsStringBytes = unless isWindows $ run "OsString: bytes that are not valid t
     -- in a shell command, quoted by showCommandForUser
     readBytes (O.shell (O.showCommandForUser (ascii "printf") [ascii "%s", raw]))
       >>= check "shell command"
+
+testOsStringOldFunctions :: IO ()
+testOsStringOldFunctions = do
+    run "OsString: rawSystem" $ do
+        ec <- O.rawSystem (ascii "echo") [ascii "hello", ascii "world"]
+        expectExit ExitSuccess ec
+
+    run "OsString: system" $ do
+        ec <- O.system (ascii "exit 3")
+        expectExit (ExitFailure 3) ec
+
+        res <- try $ O.system mempty
+        case res of
+            Left e | show (e :: IOError) == "system: invalid argument (null command)" -> return ()
+            _ -> error $ show res
+
+    run "OsString: runCommand" $ do
+        ec <- O.runCommand (ascii "exit 0") >>= waitForProcess
+        expectExit ExitSuccess ec
+
+    run "OsString: runProcess" $ do
+        ec <- O.runProcess (ascii "echo") [ascii "hello", ascii "world"]
+                  Nothing Nothing Nothing Nothing Nothing
+                >>= waitForProcess
+        expectExit ExitSuccess ec
+
+    run "OsString: runInteractiveProcess" $ do
+        r <- O.runInteractiveProcess (ascii "echo") [ascii "hello", ascii "world"]
+                 Nothing Nothing
+        output <- interact' r
+        unless (output == "hello world\n") $
+            error $ "unexpected output, got: " ++ show output
+
+    run "OsString: runInteractiveCommand" $ do
+        r <- O.runInteractiveCommand (ascii "echo hello")
+        output <- interact' r
+        -- The shell of Windows ends the line in a different way.
+        unless (takeWhile (\c -> c /= '\r' && c /= '\n') output == "hello") $
+            error $ "unexpected output, got: " ++ show output
+  where
+    expectExit expected ec = unless (ec == expected) $
+        error $ "unexpected exit code: " ++ show ec
+
+    interact' (inp, out, err, ph) = do
+        hClose inp
+        output <- hGetContents out
+        evaluate (rnf output)
+        ec <- waitForProcess ph
+        hClose out
+        hClose err
+        expectExit ExitSuccess ec
+        return output
+
+testOsStringInternals :: IO ()
+testOsStringInternals = do
+    run "OsString: Internals.translate" $ do
+        let arg = "hello world"
+        -- The result is the one of System.Process.Internals, encoded.
+        expected <- OsPath.encodeUtf (translate arg)
+        let actual = OI.translate (ascii arg)
+        unless (actual == expected) $
+            error $ "unexpected result, got: " ++ show actual
+
+    run "OsString: Internals.withFilePathException" $ do
+        res <- try $ OI.withFilePathException (ascii "some-file") $
+                   ioError (userError "failed")
+        case res of
+            Left e | ioeGetFileName e == Just "some-file" -> return ()
+            _ -> error $ show (res :: Either IOError ())
+
+    run "OsString: Internals.createProcess_" $ do
+        (_, _, _, ph) <- OI.createProcess_ "test" (O.proc (ascii "echo") [ascii "hello"])
+        ec <- waitForProcess ph
+        unless (ec == ExitSuccess) $
+            error $ "unexpected exit code: " ++ show ec
+
+#if !defined(mingw32_HOST_OS)
+    -- On Windows the environment is one block of wide characters.
+    run "OsString: Internals.withCEnvironment" $ do
+        vars <- OI.withCEnvironment [(ascii "A", ascii "b"), (ascii "C", mempty)] $ \p ->
+                    peekArray0 nullPtr p >>= mapM peekCString
+        unless (vars == ["A=b", "C="]) $
+            error $ "unexpected result, got: " ++ show vars
+#endif
+
+testOsStringCommunicationHandle :: IO ()
+testOsStringCommunicationHandle = run "OsString: CommunicationHandle" $ do
+  -- Workaround for Cabal bug #9854 (cli-child executable not in PATH).
+  cliChild <- OsPath.encodeFS $
+        case lookup "cli-child" processInternalExes of
+          Just cliChildPath -> cliChildPath
+          Nothing -> "cli-child" <.> exeExtension
+  (ex, output) <-
+    OC.readCreateProcessWithExitCodeCommunicationHandle
+      (\(chTheyRead, chTheyWrite) ->
+        O.proc cliChild [ascii (show chTheyRead), ascii (show chTheyWrite)])
+      hGetContents
+      (`hPutStr` "hello")
+  case ex of
+    ExitSuccess ->
+      if output == "olleh123"
+      then return ()
+      else error $ "unexpected output " ++ show output
+    ExitFailure {} ->
+      error $ "child exited with exception " ++ show ex
 
 withCurrentDirectory :: FilePath -> IO a -> IO a
 withCurrentDirectory new inner = do
