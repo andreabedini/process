@@ -48,6 +48,7 @@ flag os-string
 
 library
     default-language: Haskell2010
+    hs-source-dirs: .
     other-extensions:
         BangPatterns
         CPP
@@ -69,7 +70,13 @@ library
     other-modules:
         System.Process.Common
         System.Process.Common.OsString
+        System.Process.OsString.Platform
+
+    -- System.Process.OsString.Platform exists once for each platform, with
+    -- the same exports. We pick the one to compile here, so that the module
+    -- itself needs no CPP.
     if os(windows)
+        hs-source-dirs: windows
         c-sources:
             cbits/win32/runProcess.c
         other-modules: System.Process.Windows
@@ -81,10 +88,13 @@ library
     else
         build-depends: unix >= 2.8.0.0 && < 2.9
         if arch(javascript)
+            hs-source-dirs: javascript
             js-sources:
                 jsbits/process.js
             other-modules: System.Process.JavaScript
         else
+            hs-source-dirs: posix
+            build-depends: bytestring >= 0.11.3 && < 0.13
             c-sources:
                 cbits/posix/runProcess.c
                 cbits/posix/fork_exec.c

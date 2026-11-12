@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP #-}
 {-# OPTIONS_HADDOCK not-home #-}
 
 -----------------------------------------------------------------------------
@@ -26,51 +25,21 @@
 -----------------------------------------------------------------------------
 
 module System.Process.Internals.OsString (
-    ProcessHandle(..), ProcessHandle__(..),
-    PHANDLE, closePHANDLE, mkProcessHandle,
-#if defined(mingw32_HOST_OS)
-    CGid(..),
-#else
-    CGid,
-#endif
-    GroupID,
-    UserID,
-    modifyProcessHandle, withProcessHandle,
+    -- * For 'System.OsString.OsString'
     CreateProcess(..),
-    CmdSpec(..), StdStream(..), ProcRetHandles (..),
+    CmdSpec(..),
     createProcess_,
-    fdToHandle,
-    startDelegateControlC,
-    endDelegateControlC,
-    stopDelegateControlC,
-    unwrapHandles,
-#if defined(mingw32_HOST_OS)
-    terminateJob,
-    terminateJobUnsafe,
-    waitForJobCompletion,
-    timeout_Infinite,
-#else
-#if !defined(javascript_HOST_ARCH)
-    pPrPr_disableITimers, c_execvpe,
-    runInteractiveProcess_lock,
-#endif
-    ignoreSignal, defaultSignal,
-#endif
-    withFilePathException, withCEnvironment,
+    withFilePathException,
+    withCEnvironment,
     translate,
-    createPipe,
-    createPipeFd,
-    interruptProcessGroupOf,
-    withForkWait,
-    ignoreSigPipe,
+    -- * The same as in "System.Process.Internals"
+    module System.Process.Internals,
     ) where
 
 import System.Process.Common.OsString
   ( CreateProcess(..)
   , CmdSpec(..)
-  , createProcess_
   , translate
-  , withCEnvironment
   , withFilePathException
   )
 import System.Process.Internals hiding
@@ -82,3 +51,4 @@ import System.Process.Internals hiding
   , withCEnvironment
   , withFilePathException
   )
+import System.Process.OsString.Platform (createProcess_, withCEnvironment)

@@ -19,6 +19,7 @@ import Data.IORef
 import Data.List (isInfixOf)
 import Data.Maybe (isNothing)
 import Data.Word (Word8)
+import Foreign.Ptr (nullPtr)
 import System.IO (hClose, hFlush, openBinaryTempFile, hGetContents, hPutStr)
 import qualified Data.ByteString as SBS
 import qualified Data.ByteString.Lazy as LBS
@@ -31,11 +32,6 @@ import GHC.Conc.Sync (getUncaughtExceptionHandler, setUncaughtExceptionHandler)
 
 #if defined(__IO_MANAGER_WINIO__)
 import GHC.IO.SubSystem ((<!>))
-#endif
-#if !defined(mingw32_HOST_OS)
-import Foreign.C.String (peekCString)
-import Foreign.Marshal.Array (peekArray0)
-import Foreign.Ptr (nullPtr)
 #endif
 
 import Test.Paths ( processInternalExes )
@@ -544,14 +540,12 @@ testOsStringInternals = do
         unless (ec == ExitSuccess) $
             error $ "unexpected exit code: " ++ show ec
 
-#if !defined(mingw32_HOST_OS)
-    -- On Windows the environment is one block of wide characters.
+    -- The type of the pointer depends on the platform, so we do not look at
+    -- what it points to. testOsStringCwdAndEnv tests the content on POSIX.
     run "OsString: Internals.withCEnvironment" $ do
-        vars <- OI.withCEnvironment [(ascii "A", ascii "b"), (ascii "C", mempty)] $ \p ->
-                    peekArray0 nullPtr p >>= mapM peekCString
-        unless (vars == ["A=b", "C="]) $
-            error $ "unexpected result, got: " ++ show vars
-#endif
+        ok <- OI.withCEnvironment [(ascii "A", ascii "b"), (ascii "C", mempty)] $ \p ->
+                  return (p /= nullPtr)
+        unless ok $ error "unexpected null pointer"
 
 testOsStringCommunicationHandle :: IO ()
 testOsStringCommunicationHandle = run "OsString: CommunicationHandle" $ do

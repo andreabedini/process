@@ -1,69 +1,30 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE PackageImports #-}
-
--- | The types of "System.Process.OsString", and the functions of the
--- 'OsString' API that depend on the platform.
+-- | The parts of the 'OsString' API that are the same on every platform.
 --
--- "System.Process.Common" does the same for the 'FilePath' API.
+-- The parts that differ are in "System.Process.OsString.Platform". That module
+-- exists once for each platform, in the directories @posix@, @windows@ and
+-- @javascript@, and @process.cabal@ picks one of them.
 module System.Process.Common.OsString
     ( CreateProcess(..)
     , CmdSpec(..)
-    , createProcess_
     , withFilePathException
-    , withCEnvironment
     , translate
     , toFilePathCreateProcess
+    , decodeEnvironment
     , decodeLenient
     , encodeLenient
     ) where
 
 import Control.Exception (SomeException, handle, try)
-#if defined(mingw32_HOST_OS)
-import Foreign.C.String (CWString)
-#else
-import Foreign.C.String (CString)
-#endif
-import Foreign.Ptr (Ptr)
 import GHC.IO.Encoding.Failure (CodingFailureMode(RoundtripFailure))
 import GHC.IO.Encoding.UTF8 (mkUTF8)
-import System.IO (Handle)
 import System.IO.Error (ioeSetFileName)
-import System.OsPath (OsPath)
+import System.OsPath (OsPath, OsString)
 import qualified System.OsPath as OsPath
 import System.OsPath.Encoding (utf16le_b)
-#if MIN_VERSION_filepath(1, 5, 0)
-import "os-string" System.OsString.Internal.Types (OsString(..))
-#else
-import "filepath" System.OsString.Internal.Types (OsString(..))
-#endif
 
-import System.Process.Common
-  ( GroupID, ProcessHandle, StdStream, UserID )
+import System.Process.Common (GroupID, StdStream, UserID)
 import qualified System.Process.Common as F
 import qualified System.Process.Internals as F (translate)
-
-#if defined(mingw32_HOST_OS) || defined(javascript_HOST_ARCH)
-
-import qualified System.Process.Internals as F (createProcess_, withCEnvironment)
-
-#else
-
-import Foreign.Marshal.Array (withArray0)
-import Foreign.Marshal.Utils (maybeWith, withMany)
-import Foreign.Ptr (nullPtr)
-import System.Posix.PosixPath.FilePath (withFilePath)
-#if MIN_VERSION_filepath(1, 5, 0)
-import "os-string" System.OsString.Data.ByteString.Short (useAsCString)
-import "os-string" System.OsString.Internal.Types (PosixString(..))
-#else
-import "filepath" System.OsPath.Data.ByteString.Short (useAsCString)
-import "filepath" System.OsString.Internal.Types (PosixString(..))
-#endif
-
-import System.Process.Internals (unwrapHandles)
-import System.Process.Posix (ProcessOptions(..), createProcess_Raw)
-
-#endif
 
 -- ----------------------------------------------------------------------------
 -- Types
@@ -126,7 +87,7 @@ toFilePathCreateProcess cp = do
     RawCommand cmd args -> F.RawCommand <$> OsPath.decodeFS cmd
                                         <*> mapM OsPath.decodeFS args
   cwd' <- traverse OsPath.decodeFS (cwd cp)
-  env' <- traverse (mapM decodeVar) (env cp)
+  env' <- traverse decodeEnvironment (env cp)
   return F.CreateProcess
     { F.cmdspec            = cmdspec'
     , F.cwd                = cwd'
@@ -145,8 +106,11 @@ toFilePathCreateProcess cp = do
     , F.use_process_jobs   = use_process_jobs cp
     }
 
-decodeVar :: (OsString, OsString) -> IO (String, String)
-decodeVar (name, val) = (,) <$> OsPath.decodeFS name <*> OsPath.decodeFS val
+-- | Decode an environment in the same way as 'toFilePathCreateProcess'.
+decodeEnvironment :: [(OsString, OsString)] -> IO [(String, String)]
+decodeEnvironment = mapM decodeVar
+  where
+    decodeVar (name, val) = (,) <$> OsPath.decodeFS name <*> OsPath.decodeFS val
 
 -- | Decode an 'OsString' without failing and without using the locale.
 --
@@ -183,96 +147,3 @@ withFilePathException path = handle mapEx
             Left e   -> const (decodeLenient path) (e :: SomeException)
             Right fp -> fp
       ioError (ioeSetFileName ex fpath)
-
--- ----------------------------------------------------------------------------
--- createProcess_
-
--- | 'System.Process.createProcess_' for 'OsString'.
---
--- @since 1.6.31.0
-createProcess_
-  :: String
-       -- ^ Function name (for error messages).
-  -> CreateProcess
-  -> IO (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle)
-
-#if defined(mingw32_HOST_OS) || defined(javascript_HOST_ARCH)
-
--- On Windows, the base library turns a String into UTF-16 code units and back
--- without losing anything, and 'toFilePathCreateProcess' uses the same
--- conversion. So we can go through the FilePath-based implementation, and
--- keep only one copy of the code that escapes a Windows command line.
---
--- The JavaScript backend gives strings to node.js as JavaScript strings, so
--- it has to decode an OsString at some point anyway.
-createProcess_ fun cp = toFilePathCreateProcess cp >>= F.createProcess_ fun
-
--- | 'System.Process.Internals.withCEnvironment' for 'OsString'.
---
--- @since 1.6.31.0
-#if defined(mingw32_HOST_OS)
-withCEnvironment :: [(OsString, OsString)] -> (Ptr CWString -> IO a) -> IO a
-#else
-withCEnvironment :: [(OsString, OsString)] -> (Ptr CString -> IO a) -> IO a
-#endif
-withCEnvironment envir act = do
-  envir' <- mapM decodeVar envir
-  F.withCEnvironment envir' act
-
-#else
-
--- On POSIX an OsString is a sequence of bytes. We give these bytes to the
--- operating system as they are. The FilePath-based implementation cannot do
--- this: it encodes every String with the encoding of the current locale.
-createProcess_ fun cp =
-  withFilePathException cmd $
-   maybeWith withCEnvironment (env cp) $ \pEnv ->
-   maybeWith withOsPath (cwd cp) $ \pWorkDir ->
-   withOsPath cmd $ \cmdstr ->
-   withMany withOsString args $ \argstrs ->
-   withArray0 nullPtr (cmdstr : argstrs) $ \pargs ->
-     unwrapHandles <$> createProcess_Raw fun opts pargs pWorkDir pEnv
-  where
-    (cmd, args) = commandToProcess (cmdspec cp)
-    opts = ProcessOptions
-      { po_std_in             = std_in cp
-      , po_std_out            = std_out cp
-      , po_std_err            = std_err cp
-      , po_close_fds          = close_fds cp
-      , po_create_group       = create_group cp
-      , po_delegate_ctlc      = delegate_ctlc cp
-      , po_detach_console     = detach_console cp
-      , po_create_new_console = create_new_console cp
-      , po_new_session        = new_session cp
-      , po_child_group        = child_group cp
-      , po_child_user         = child_user cp
-      }
-
-commandToProcess :: CmdSpec -> (OsPath, [OsString])
-commandToProcess (ShellCommand string) = (ascii "/bin/sh", [ascii "-c", string])
-commandToProcess (RawCommand cmd args) = (cmd, args)
-
--- | An 'OsString' from a string literal that has only ASCII characters.
-ascii :: String -> OsString
-ascii = OsPath.pack . map OsPath.unsafeFromChar
-
--- | Marshal a path. Like 'System.Posix.Internals.withFilePath', this fails
--- if the path has a NUL byte in it (with @unix@ 2.8.2 or later).
-withOsPath :: OsPath -> (CString -> IO a) -> IO a
-withOsPath = withFilePath . getOsString
-
--- | Marshal a string that is not a path. Like 'Foreign.C.String.withCString',
--- this does not look for NUL bytes: the operating system sees the string up
--- to its first NUL byte.
-withOsString :: OsString -> (CString -> IO a) -> IO a
-withOsString = useAsCString . getPosixString . getOsString
-
--- | 'System.Process.Internals.withCEnvironment' for 'OsString'.
---
--- @since 1.6.31.0
-withCEnvironment :: [(OsString, OsString)] -> (Ptr CString -> IO a) -> IO a
-withCEnvironment envir act =
-  let env' = map (\(name, val) -> name <> ascii "=" <> val) envir
-  in withMany withOsString env' (\pEnv -> withArray0 nullPtr pEnv act)
-
-#endif

@@ -138,11 +138,11 @@ import qualified System.Process as F
 import System.Process.Common.OsString
   ( CmdSpec(..)
   , CreateProcess(..)
-  , createProcess_
   , decodeLenient
   , encodeLenient
   )
 import System.Process.Internals (ignoreSigPipe, withForkWait)
+import System.Process.OsString.Platform (createProcess_)
 
 -- ----------------------------------------------------------------------------
 -- createProcess
