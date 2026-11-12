@@ -1,5 +1,13 @@
 # Changelog for [`process` package](http://hackage.haskell.org/package/process)
 
+## next
+
+* Add `System.Process.OsString`, a version of the `System.Process` API for
+  `OsPath` and `OsString`. On POSIX it gives the bytes of the command, of its
+  arguments, of the working directory and of the environment to the operating
+  system as they are, so the result does not depend on the locale.
+  ([#252](https://github.com/haskell/process/issues/252))
+
 ## 1.6.30.0 *June 2026*
 
 * darwin: Allow posix_spawn_file_actions_addchdir to be missing when

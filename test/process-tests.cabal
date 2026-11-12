@@ -47,7 +47,7 @@ test-suite test
                , bytestring >= 0.11 && < 0.13
                , deepseq  >= 1.1 && < 1.6
                , directory >= 1.1 && < 1.4
-               , filepath >= 1.2 && < 1.6
+               , filepath >= 1.4.100.0 && < 1.6
   build-tool-depends: process-tests:cli-child
   ghc-options: -threaded -rtsopts -with-rtsopts "-N"
   other-modules: Test.Paths

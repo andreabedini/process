@@ -9,18 +9,22 @@ import System.Directory (getCurrentDirectory, setCurrentDirectory)
 import System.Process
 import System.Process.Internals (withForkWait, ignoreSigPipe)
 import System.Process.CommunicationHandle
+import qualified System.Process.OsString as O
 import Control.Concurrent
 import Control.DeepSeq
 import Data.Char (isDigit)
 import Data.IORef
 import Data.List (isInfixOf)
 import Data.Maybe (isNothing)
+import Data.Word (Word8)
 import System.IO (hClose, hFlush, openBinaryTempFile, hGetContents, hPutStr)
 import qualified Data.ByteString as SBS
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Char8 as S8
 import System.Directory (getTemporaryDirectory, removeFile, exeExtension)
 import System.FilePath ((<.>))
+import System.OsPath (OsString)
+import qualified System.OsPath as OsPath
 import GHC.Conc.Sync (getUncaughtExceptionHandler, setUncaughtExceptionHandler)
 
 #if defined(__IO_MANAGER_WINIO__)
@@ -62,6 +66,13 @@ main = do
     -- With WinIO, also run the test with the child process using WinIO
     testCommunicationHandle True
 #endif
+    testOsStringReadProcess
+    testOsStringShell
+    testOsStringDoesNotExist
+    testOsStringCallProcessFailure
+    testOsStringShowCommandForUser
+    testOsStringCwdAndEnv
+    testOsStringBytes
     putStrLn ">>> Tests passed successfully"
 
 run :: String -> IO () -> IO ()
@@ -349,6 +360,104 @@ testAddChdir2 = run "testAddChdir2" $ handleIOErr $ do
   exitCode <- waitForProcess commhand
   print exitCode
   where handleIOErr a = a `catchIOError` \e -> putStrLn ("Exc: " ++ show (ioeGetErrorType e))
+
+-- | An 'OsString' from a string literal that has only ASCII characters.
+ascii :: String -> OsString
+ascii = OsPath.pack . map OsPath.unsafeFromChar
+
+testOsStringReadProcess :: IO ()
+testOsStringReadProcess = run "OsString: readProcess" $ do
+    output <- O.readProcess (ascii "echo") [ascii "hello", ascii "world"] ""
+    unless (output == "hello world\n") $
+        error $ "unexpected output, got: " ++ output
+
+    (ec, out, err) <-
+      O.readProcessWithExitCode (ascii "echo") [ascii "hello", ascii "world"] ""
+    unless ((ec, out, err) == (ExitSuccess, "hello world\n", "")) $
+        error $ "unexpected result, got: " ++ show (ec, out, err)
+
+testOsStringShell :: IO ()
+testOsStringShell = run "OsString: shell" $ do
+    output <- O.readCreateProcess (O.shell (ascii "echo hello")) ""
+    -- The shell of Windows ends the line in a different way.
+    unless (takeWhile (\c -> c /= '\r' && c /= '\n') output == "hello") $
+        error $ "unexpected output, got: " ++ show output
+
+testOsStringDoesNotExist :: IO ()
+testOsStringDoesNotExist = run "OsString: non-existent executable" $ do
+    res <- try $ do
+        (_, _, _, ph) <- O.createProcess (O.proc (ascii "definitelydoesnotexist") [])
+            { O.close_fds = True
+            }
+        waitForProcess ph
+    case res of
+        Left e
+          | isDoesNotExistError e
+          , ioeGetFileName e == Just "definitelydoesnotexist" -> return ()
+        _ -> error $ show res
+
+testOsStringCallProcessFailure :: IO ()
+testOsStringCallProcessFailure = run "OsString: callProcess failure" $ do
+    res <- try $ O.callProcess (ascii "sh") [ascii "-c", ascii "exit 3"]
+    case res of
+        Left e
+          | ioeGetLocation e == "callProcess: sh \"-c\" \"exit 3\" (exit 3)" -> return ()
+        _ -> error $ show res
+
+testOsStringShowCommandForUser :: IO ()
+testOsStringShowCommandForUser = run "OsString: showCommandForUser" $ do
+    let cmd = "echo"
+        args = ["hello world", "it's", ""]
+    -- The result is the one of System.Process, encoded.
+    expected <- OsPath.encodeUtf (showCommandForUser cmd args)
+    let actual = O.showCommandForUser (ascii cmd) (map ascii args)
+    unless (actual == expected) $
+        error $ "unexpected result, got: " ++ show actual
+
+testOsStringCwdAndEnv :: IO ()
+testOsStringCwdAndEnv = unless isWindows $ run "OsString: cwd and env" $ do
+    output <- O.readCreateProcess
+        (O.proc (ascii "/bin/sh") [ascii "-c", ascii "pwd; printf '%s' \"$PROCESS_TEST_VAR\""])
+            { O.cwd = Just (ascii "/")
+            , O.env = Just [(ascii "PROCESS_TEST_VAR", ascii "hello")]
+            }
+        ""
+    unless (output == "/\nhello") $
+        error $ "unexpected output, got: " ++ show output
+
+-- | Test that on POSIX the new process gets the bytes of an 'OsString' as they
+-- are, even when they are not valid in the encoding of the locale.
+testOsStringBytes :: IO ()
+testOsStringBytes = unless isWindows $ run "OsString: bytes that are not valid text" $ do
+    let bytes :: [Word8]
+        bytes = [0x66, 0xff, 0xfe, 0x20, 0xc3, 0x28, 0x6f]
+        raw = OsPath.pack (map (OsPath.unsafeFromChar . toEnum . fromIntegral) bytes)
+        expected = SBS.pack bytes
+
+        readBytes cp = do
+            (_, Just out, _, ph) <- O.createProcess cp { O.std_out = CreatePipe }
+            res <- SBS.hGetContents out
+            hClose out
+            ec <- waitForProcess ph
+            unless (ec == ExitSuccess)
+                $ error $ "Unexpected exit code " ++ show ec
+            return res
+
+        check what res = unless (res == expected) $
+            error $ what ++ ": unexpected output, got: " ++ show res
+
+    -- as an argument
+    readBytes (O.proc (ascii "/bin/sh") [ascii "-c", ascii "printf '%s' \"$1\"", ascii "sh", raw])
+      >>= check "argument"
+
+    -- in the environment
+    readBytes (O.proc (ascii "/bin/sh") [ascii "-c", ascii "printf '%s' \"$PROCESS_TEST_VAR\""])
+                { O.env = Just [(ascii "PROCESS_TEST_VAR", raw)] }
+      >>= check "environment"
+
+    -- in a shell command, quoted by showCommandForUser
+    readBytes (O.shell (O.showCommandForUser (ascii "printf") [ascii "%s", raw]))
+      >>= check "shell command"
 
 withCurrentDirectory :: FilePath -> IO a -> IO a
 withCurrentDirectory new inner = do

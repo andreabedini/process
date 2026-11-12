@@ -7,6 +7,8 @@ module System.Process.Posix
     ( mkProcessHandle
     , translateInternal
     , createProcess_Internal
+    , ProcessOptions(..)
+    , createProcess_Raw
     , withCEnvironment
     , closePHANDLE
     , startDelegateControlC
@@ -127,19 +129,84 @@ createProcess_Internal fun
                                   child_user = mb_child_user }
  = do
   let (cmd,args) = commandToProcess cmdsp
+      opts = ProcessOptions { po_std_in = mb_stdin,
+                              po_std_out = mb_stdout,
+                              po_std_err = mb_stderr,
+                              po_close_fds = mb_close_fds,
+                              po_create_group = mb_create_group,
+                              po_delegate_ctlc = mb_delegate_ctlc,
+                              po_detach_console = mb_detach_console,
+                              po_create_new_console = mb_create_new_console,
+                              po_new_session = mb_new_session,
+                              po_child_group = mb_child_group,
+                              po_child_user = mb_child_user }
   withFilePathException cmd $
+   maybeWith withCEnvironment mb_env $ \pEnv ->
+   maybeWith withFilePath mb_cwd $ \pWorkDir ->
+   withFilePath cmd $ \cmdstr ->
+   withMany withCString args $ \argstrs ->
+   withArray0 nullPtr (cmdstr : argstrs) $ \pargs ->
+     createProcess_Raw fun opts pargs pWorkDir pEnv
+
+-- | The fields of a @CreateProcess@ record that are not strings.
+--
+-- "System.Process" and "System.Process.OsString" each have their own
+-- @CreateProcess@ record. The two records differ only in the type of the
+-- command, of its arguments, of the working directory and of the environment.
+-- The other fields are the same, and 'createProcess_Raw' takes them in this
+-- form.
+data ProcessOptions = ProcessOptions
+  { po_std_in             :: StdStream
+  , po_std_out            :: StdStream
+  , po_std_err            :: StdStream
+  , po_close_fds          :: Bool
+  , po_create_group       :: Bool
+  , po_delegate_ctlc      :: Bool
+  , po_detach_console     :: Bool
+  , po_create_new_console :: Bool
+  , po_new_session        :: Bool
+  , po_child_group        :: Maybe GroupID
+  , po_child_user         :: Maybe UserID
+  }
+
+-- | Create a process from a command, a working directory and an environment
+-- that the caller has already marshalled to C strings.
+--
+-- This is the part of process creation that is the same for
+-- "System.Process" and "System.Process.OsString". The two modules marshal
+-- their strings in different ways, then call this function.
+createProcess_Raw
+    :: String
+       -- ^ Function name (for error messages).
+    -> ProcessOptions
+    -> Ptr CString
+       -- ^ The executable followed by its arguments, terminated by 'nullPtr'.
+    -> CString
+       -- ^ The working directory, or 'nullPtr' to inherit it.
+    -> Ptr CString
+       -- ^ The environment as @NAME=VALUE@ strings, terminated by 'nullPtr'.
+       -- Pass 'nullPtr' itself to inherit the environment.
+    -> IO ProcRetHandles
+createProcess_Raw fun
+                  ProcessOptions{ po_std_in = mb_stdin,
+                                  po_std_out = mb_stdout,
+                                  po_std_err = mb_stderr,
+                                  po_close_fds = mb_close_fds,
+                                  po_create_group = mb_create_group,
+                                  po_delegate_ctlc = mb_delegate_ctlc,
+                                  po_detach_console = mb_detach_console,
+                                  po_create_new_console = mb_create_new_console,
+                                  po_new_session = mb_new_session,
+                                  po_child_group = mb_child_group,
+                                  po_child_user = mb_child_user }
+                  pargs pWorkDir pEnv
+ =
    alloca $ \ pfdStdInput  ->
    alloca $ \ pfdStdOutput ->
    alloca $ \ pfdStdError  ->
    alloca $ \ pFailedDoing ->
-   maybeWith withCEnvironment mb_env $ \pEnv ->
-   maybeWith withFilePath mb_cwd $ \pWorkDir ->
    maybeWith with mb_child_group $ \pChildGroup ->
-   maybeWith with mb_child_user $ \pChildUser ->
-   withFilePath cmd $ \cmdstr ->
-   withMany withCString args $ \argstrs -> do
-   let cstrs = cmdstr : argstrs
-   withArray0 nullPtr cstrs $ \pargs -> do
+   maybeWith with mb_child_user $ \pChildUser -> do
 
      fdin  <- mbFd fun fd_stdin  mb_stdin
      fdout <- mbFd fun fd_stdout mb_stdout
